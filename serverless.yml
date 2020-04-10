@@ -1,0 +1,260 @@
+plugins:
+  - serverless-pseudo-parameters
+  - serverless-stack-termination-protection
+  - serverless-stack-output
+  - serverless-python-requirements
+
+custom:
+  conf: ${file(conf/stage.${self:provider.stage}.yml)}
+  serverlessTerminationProtection:
+    stages: ["prod"]
+  output:
+    file: stack.yml # toml, yaml, yml, and json format is available
+  pythonRequirements:
+    dockerizePip: non-linux
+    slim: true
+    noDeploy:
+      - requirements.txt
+      - .completed_requirements
+
+service:
+  name: ${self:custom.conf.service.stack_name, 'gb-shovel'}
+
+provider:
+  name: aws
+  runtime: python3.8
+  versionFunctions: false
+  stage: ${opt:stage, 'dev'}
+  region: eu-west-1
+  lambda: "arn:aws:lambda:#{AWS::Region}:#{AWS::AccountId}:function:${self:service}-${self:provider.stage}"
+  logRetentionInDays: 7
+  logs:
+    restApi:
+      level: ${self:custom.conf.service.log_level, 'INFO'}
+  environment:
+    log_level: ${self:custom.conf.service.log_level, 'INFO'}
+  deploymentBucket:
+    maxPreviousDeploymentArtifacts: 0
+# you can add packaging information here
+package:
+  excludeDevDependencies: false
+  include:
+    - handler.py
+    - commons/**
+  exclude:
+    - ./**
+
+functions:
+  main:
+    handler: handler.main
+    role: MainLambdaExecutionRole
+    environment:
+      email_forward_rules: !Ref EmailForwardRules
+      email_bucket:
+        !If [UseEmailBucket, !Ref EmailBucket, !Ref ServerlessDeploymentBucket]
+      email_bucket_prefix: !Ref EmailBucketPrefix
+      ses_receipt_rule: !Ref AWS::StackName
+      aws_account_id: !Ref AWS::AccountId
+      aws_region: !Ref AWS::Region
+    memorySize: 512
+    timeout: 300
+# you can add CloudFormation resource templates here
+resources:
+  Description: ${self:custom.conf.service.description, 'GB Shovel'}
+
+  Parameters:
+    RuleSetName:
+      Type: String
+      Default: ${self:custom.conf.service.rule_set_name, ''}
+      Description: The currently active email receiving rule set name
+
+    ReceiptRuleRecipients:
+      Type: CommaDelimitedList
+      Default: ${self:custom.conf.service.receipt_rule_recipients, ''}
+
+    EmailBucket:
+      Type: String
+      Default: ${self:custom.conf.service.email_bucket, ''}
+      Description: The destination bucket to save and store the emails
+
+    EmailBucketPrefix:
+      Type: String
+      Default: ${self:custom.conf.service.email_bucket_prefix, ''}
+      Description: An optional prefix for the storage
+
+    EmailEncryptionKmsKeyArn:
+      Type: String
+      Default: ${self:custom.conf.service.email_encryption_kms_key_arn, ''}
+      Description: An optional KMS key SES will use to encrypt your emails before storing
+
+    EmailForwardRules:
+      Type: String
+      Default: ${self:custom.conf.lambda.email_forward_rules, ''}
+      Description: 'The mapping of forawrd rules as json { "source": "target" }'
+
+  Outputs:
+    ShovelArn:
+      Description: "The Shovel Lambda ARN"
+      Value: !GetAtt MainLambdaFunction.Arn
+
+  Conditions:
+    UseEmailBucket: !Not [!Equals [!Ref EmailBucket, ""]]
+    CreateRuleSet: !Equals [!Ref RuleSetName, ""]
+    EncryptEmail: !Not [!Equals [!Ref EmailEncryptionKmsKeyArn, ""]]
+
+  Resources:
+    ServerlessDeploymentBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        # BucketName: !Ref AWS::StackName
+        LifecycleConfiguration:
+          Rules:
+            - Id: Removal
+              Status: Enabled
+              Prefix: !Ref EmailBucketPrefix
+              ExpirationInDays: 2
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+
+    ServerlessDeploymentBucketPolicyOverride:
+      Type: AWS::S3::BucketPolicy
+      DependsOn: ServerlessDeploymentBucketPolicy
+      Properties:
+        Bucket: !Ref ServerlessDeploymentBucket
+        PolicyDocument:
+          Statement:
+            - Action: s3:*
+              Effect: Deny
+              Principal: "*"
+              Resource:
+                - !Sub "#{ServerlessDeploymentBucket.Arn}/*"
+              Condition:
+                Bool:
+                  aws:SecureTransport: false
+            - Effect: Allow
+              Principal:
+                Service: ses.amazonaws.com
+              Action:
+                - s3:PutObject
+              Resource:
+                - !Sub "#{ServerlessDeploymentBucket.Arn}/*"
+              Condition:
+                StringEquals:
+                  aws:Referer: !Ref AWS::AccountId
+
+    LambdaResourcePolicy:
+      Type: AWS::Lambda::Permission
+      DependsOn: MainLambdaFunction
+      Properties:
+        FunctionName: !GetAtt MainLambdaFunction.Arn
+        Action: lambda:InvokeFunction
+        Principal: ses.amazonaws.com
+        SourceAccount: !Ref AWS::AccountId
+
+    # Generic policy which applies to all lambda-handlers
+    LambdaExecutionPolicy:
+      Type: AWS::IAM::ManagedPolicy
+      Properties:
+        ManagedPolicyName: !Sub "#{AWS::StackName}-LambdaExecutionPolicy"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            # To connect to a VPC, the execution role must have the following permissions.
+            # See: https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html#vpc-permissionss
+            - Effect: Allow
+              Action:
+                - ec2:CreateNetworkInterface
+                - ec2:DescribeNetworkInterfaces
+                - ec2:DeleteNetworkInterface
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource:
+                - !Sub "arn:aws:logs:#{AWS::Region}:#{AWS::AccountId}:log-group:/aws/lambda/#{AWS::StackName}*"
+
+    MainLambdaExecutionRole:
+      Type: AWS::IAM::Role
+      DependsOn: LambdaExecutionPolicy
+      Properties:
+        RoleName: !Sub "#{AWS::StackName}-MainLambdaExecutionRole"
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - !Ref LambdaExecutionPolicy
+        Policies:
+          - PolicyName: MainLambdaExecutionPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                  Resource:
+                    - !If [
+                        UseEmailBucket,
+                        !Sub "arn:aws:s3:::#{EmailBucket}/*",
+                        !Sub "arn:aws:s3:::#{ServerlessDeploymentBucket}/*",
+                      ]
+                - Effect: Allow
+                  Action:
+                    - ses:SendRawEmail
+                  Resource:
+                    - "arn:aws:ses:#{AWS::Region}:#{AWS::AccountId}:identity/*"
+                - Effect: Allow
+                  Action:
+                    - kms:Decrypt
+                  Resource:
+                    - !Ref EmailEncryptionKmsKeyArn
+
+    RuleSet:
+      Type: AWS::SES::ReceiptRuleSet
+      Condition: CreateRuleSet
+      Properties:
+        RuleSetName: !Ref AWS::StackName
+
+    ReceiptRule:
+      Type: AWS::SES::ReceiptRule
+      DependsOn:
+        - MainLambdaFunction
+        - ServerlessDeploymentBucketPolicyOverride
+      Properties:
+        RuleSetName: !If [CreateRuleSet, !Ref RuleSet, !Ref RuleSetName]
+        Rule:
+          Name: !Ref AWS::StackName
+          Actions:
+            - S3Action:
+                BucketName:
+                  !If [
+                    UseEmailBucket,
+                    !Ref EmailBucket,
+                    !Ref ServerlessDeploymentBucket,
+                  ]
+                ObjectKeyPrefix: !Ref EmailBucketPrefix
+                KmsKeyArn:
+                  !If [
+                    EncryptEmail,
+                    !Ref EmailEncryptionKmsKeyArn,
+                    !Ref AWS::NoValue,
+                  ]
+            - LambdaAction:
+                FunctionArn: !GetAtt MainLambdaFunction.Arn
+                InvocationType: RequestResponse
+          Enabled: true
+          Recipients: !Ref ReceiptRuleRecipients
+          ScanEnabled: false
+          TlsPolicy: Optional

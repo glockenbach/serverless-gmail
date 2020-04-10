@@ -1,0 +1,17 @@
+{
+  "name": "shovel",
+  "version": "1.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@bitbucket.org/glochenbach/shovel.git"
+  },
+  "author": "Glockenbach AB",
+  "homepage": "https://bitbucket.org/glochenbach/shovel#readme",
+  "devDependencies": {
+    "serverless-cloudformation-parameters": "^0.1.1",
+    "serverless-pseudo-parameters": "^2.4.0",
+    "serverless-python-requirements": "^5.0.1",
+    "serverless-stack-output": "^0.2.3",
+    "serverless-stack-termination-protection": "^1.0.0"
+  }
+}

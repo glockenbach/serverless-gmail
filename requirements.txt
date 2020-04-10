@@ -1,0 +1,3 @@
+--extra-index-url https://pypi.glockenbach.se/simple
+glockenbach-commons
+pycryptodomex

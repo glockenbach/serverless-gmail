@@ -1,0 +1,24 @@
+vpc:
+  id: vpc-35d17250
+  subnets:
+    - subnet-c6ed72a3
+    - subnet-af77f3d8
+    - subnet-ca1fc693
+
+service:
+  stack_name: gb-shovel
+  description: Forward emails to gmail
+  log_level: DEBUG
+  rule_set_name: INBOUND_MAIL
+  # email_bucket: 'gb-shovel'
+  email_bucket_prefix: ses-email
+  receipt_rule_recipients: test@windcatchers.se,test@thewindcatchers.se,test@almenbostader.se
+  email_encryption_kms_key_arn: arn:aws:kms:eu-west-1:737354003986:alias/aws/ses
+
+lambda:
+  email_forward_rules: |
+    {
+      "test@windcatchers.se": "windcatchers.glockenbach@gmail.com",
+      "test@thewindcatchers.se": "windcatchers.glockenbach@gmail.com",
+      "test@almenbostader.se": "almenbostader@gmail.com"
+    }
