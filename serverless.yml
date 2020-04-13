@@ -9,7 +9,7 @@ custom:
   serverlessTerminationProtection:
     stages: ["prod"]
   output:
-    file: stack.yml # toml, yaml, yml, and json format is available
+    file: stack.yml
   pythonRequirements:
     dockerizePip: non-linux
     slim: true
@@ -18,7 +18,7 @@ custom:
       - .completed_requirements
 
 service:
-  name: ${self:custom.conf.service.stack_name, 'gb-shovel'}
+  name: ${self:custom.conf.service.service_name, 'gb-shovel'}
 
 provider:
   name: aws
@@ -35,12 +35,11 @@ provider:
     log_level: ${self:custom.conf.service.log_level, 'INFO'}
   deploymentBucket:
     maxPreviousDeploymentArtifacts: 0
-# you can add packaging information here
+
 package:
   excludeDevDependencies: false
   include:
     - handler.py
-    - commons/**
   exclude:
     - ./**
 
@@ -58,7 +57,7 @@ functions:
       aws_region: !Ref AWS::Region
     memorySize: 512
     timeout: 300
-# you can add CloudFormation resource templates here
+
 resources:
   Description: ${self:custom.conf.service.description, 'GB Shovel'}
 
@@ -92,6 +91,11 @@ resources:
       Default: ${self:custom.conf.lambda.email_forward_rules, ''}
       Description: 'The mapping of forawrd rules as json { "source": "target" }'
 
+    SNSTopicArn:
+      Type: String
+      Default: ${self:custom.conf.service.sns_topic_arn, ''}
+      Description: "Publish errors on specific topic, blank will create a new topic"
+
   Outputs:
     ShovelArn:
       Description: "The Shovel Lambda ARN"
@@ -101,18 +105,19 @@ resources:
     UseEmailBucket: !Not [!Equals [!Ref EmailBucket, ""]]
     CreateRuleSet: !Equals [!Ref RuleSetName, ""]
     EncryptEmail: !Not [!Equals [!Ref EmailEncryptionKmsKeyArn, ""]]
+    HasSNSTopic: !Not [!Equals [!Ref SNSTopicArn, ""]]
+    IsProd: !Equals ["prod", "${self:provider.stage}"]
 
   Resources:
     ServerlessDeploymentBucket:
       Type: AWS::S3::Bucket
       Properties:
-        # BucketName: !Ref AWS::StackName
         LifecycleConfiguration:
           Rules:
             - Id: Removal
               Status: Enabled
               Prefix: !Ref EmailBucketPrefix
-              ExpirationInDays: 2
+              ExpirationInDays: 7
         BucketEncryption:
           ServerSideEncryptionConfiguration:
             ServerSideEncryptionByDefault:
@@ -219,7 +224,7 @@ resources:
                   Action:
                     - kms:Decrypt
                   Resource:
-                    - !Ref EmailEncryptionKmsKeyArn
+                    - !Sub "arn:aws:kms:#{AWS::Region}:#{AWS::AccountId}:key/*"
 
     RuleSet:
       Type: AWS::SES::ReceiptRuleSet
@@ -258,3 +263,25 @@ resources:
           Recipients: !Ref ReceiptRuleRecipients
           ScanEnabled: false
           TlsPolicy: Optional
+
+    MainLambdaErrorsAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        ActionsEnabled: true
+        AlarmActions:
+          - !If [HasSNSTopic, !Ref SNSTopicArn, !Ref AWS::NoValue]
+        AlarmDescription: There was more than 3 errors during the last hour
+        AlarmName: !Sub "#{AWS::StackName} | Invcocation Errors"
+        ComparisonOperator: "GreaterThanThreshold"
+        DatapointsToAlarm: 1
+        Dimensions:
+          - Value: !Sub "#{AWS::StackName}-main"
+            Name: FunctionName
+        EvaluationPeriods: 1
+        MetricName: Errors
+        Namespace: AWS/Lambda
+        Period: 300
+        Statistic: Sum
+        Threshold: 0
+        TreatMissingData: notBreaching
+        Unit: Count

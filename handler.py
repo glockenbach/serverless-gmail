@@ -1,4 +1,7 @@
 import glockenbach.commons as commons
+from botocore.exceptions import ClientError
+from boto3 import client as boto_client
+from time import sleep as time_sleep
 import logging
 
 logging.basicConfig(format='%(levelname)s: %(message)s', level=logging.INFO)
@@ -6,19 +9,37 @@ logger = logging.getLogger('shovel')
 logger.setLevel(commons.get_env_log_level(default=logging.INFO))
 
 
-def get_matching_destination(forward_rules: dict, destinations: list) -> str:
+def get_matching_destination(forward_rules: dict, destinations: list) -> list:
     for destination in destinations:
         if destination in forward_rules.keys():
             return [destination, forward_rules[destination]]
+    return [None, None]
+
+
+def get_prefixed_key(prefix, key):
+    return f'{prefix}/{key}' if prefix else key
+
+
+def get_object_retry_errors(bucket: str, key: str, error_codes: list = ['NoSuchKey', 'AccessDenied'], retries=5, sleep=3):
+    exception = None
+    for i in range(retries):
+        try:
+            return boto_client('s3').get_object(Bucket=bucket, Key=key)
+        except ClientError as e:
+            exception = e
+            if e.response["Error"]["Code"] in error_codes:
+                logger.warning(e.response['Error']['Message'])
+                time_sleep(sleep + i)
+    raise exception
 
 
 def main(event, context):
-    from boto3 import client as boto_client
+
     from email import message_from_bytes as email_message_from_bytes
     from json import loads as json_loads
     from re import sub as re_sub
 
-    logger.debug(f'Event: \n{event}')
+    logger.info(f'Event: \n{event}')
 
     email_bucket = commons.get_env_str('email_bucket')
     email_bucket_prefix = commons.get_env_str('email_bucket_prefix')
@@ -29,7 +50,7 @@ def main(event, context):
     for record in event.get('Records', []):
         if 'aws:ses' == record['eventSource']:
             source = record['ses']['mail']['source']
-            target = record['ses']['mail']['destination']
+            target = record['ses']['receipt']['recipients']
             subject = record['ses']['mail']['commonHeaders']['subject']
 
             logger.debug(f'Found email from {source} to {target}')
@@ -40,13 +61,12 @@ def main(event, context):
                 logger.info(f'No rules matching for: {target}')
                 continue
 
-            s3 = boto_client('s3')
             ses = boto_client('ses')
 
             message_id = record['ses']['mail']['messageId']
-            key = f'{email_bucket_prefix}/{message_id}' if email_bucket_prefix else message_id
+            key = get_prefixed_key(email_bucket_prefix, message_id)
+            s3_object = get_object_retry_errors(email_bucket, key)
 
-            s3_object = s3.get_object(Bucket=email_bucket, Key=key)
             logger.debug(f'S3Object: \n{s3_object}')
             s3_object_body = s3_object['Body']
             s3_object_meta = s3_object['Metadata']
