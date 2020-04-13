@@ -20,6 +20,7 @@ __pycache__
 .vscode
 venv
 test.py
+conf/
 
 # Serverless directories
 .serverless
